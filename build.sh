@@ -26,9 +26,17 @@ cd "$SCRIPT_DIR" || {
 color_echo "$green" "工作目录: $SCRIPT_DIR"
 
 # 参数处理
+# KERNEL_NAME / KERNEL_VERSION / KERNEL_SUFFIX 支持环境变量覆盖，
+# 便于 CI（workflow_dispatch 输入）与本地临时改名，无需改动本文件 ——
+# 这样跟上游同步时不会在这里产生冲突。
+#
+# 最终内核名 = <内核版本>-<KERNEL_NAME>-<KERNEL_SUFFIX>-<日期>
+#   例: 4.14.336-wakmemlody-nabu-hyperos1-260824
+# KERNEL_SUFFIX 置空则退化为 <内核版本>-<KERNEL_NAME>-<日期>。
 TARGET_DEVICE="nabu"
-KERNEL_NAME="Kuugo"
-KERNEL_VERSION="v1.0"
+KERNEL_NAME="${KERNEL_NAME:-wakmemlody}"
+KERNEL_VERSION="${KERNEL_VERSION:-v1.0}"
+KERNEL_SUFFIX="${KERNEL_SUFFIX:-nabu-hyperos1}"
 NO_CLEAN=false
 MAKE_FLAGS=""
 NUM_JOBS=$(nproc --all)
@@ -145,8 +153,14 @@ fi
 color_echo "$green" "正在下载并配置 KernelSU-Next"
 curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
-# 添加日期到本地版本
-LOCAL_VERSION_DATE="-${KERNEL_NAME}-${KERNEL_VERSION}-$(date +%y%m%d)"
+# 拼本地版本串。CONFIG_LOCALVERSION 会直接追加在内核版本号后面，
+# 所以必须以 - 开头。日期用 UTC，与 CI 保持一致。
+if [[ -n "$KERNEL_SUFFIX" ]]; then
+    LOCAL_VERSION_DATE="-${KERNEL_NAME}-${KERNEL_SUFFIX}-$(date +%y%m%d)"
+else
+    LOCAL_VERSION_DATE="-${KERNEL_NAME}-$(date +%y%m%d)"
+fi
+color_echo "$green" "内核名将为: $(make -s kernelversion 2>/dev/null || echo 4.14.x)${LOCAL_VERSION_DATE}"
 touch .scmversion
 
 # 配置内核
@@ -274,7 +288,10 @@ fi
 REF_BOOT="$SCRIPT_DIR/stock/boot.img"
 REF_VB="$SCRIPT_DIR/stock/vendor_boot.img"
 
-if [[ -f "$REF_BOOT" ]]; then
+# BUILD_BOOT_IMAGES=false 可显式跳过（CI 的 workflow_dispatch 输入）
+if [[ "${BUILD_BOOT_IMAGES:-true}" != "true" ]]; then
+    color_echo "$yellow" "BUILD_BOOT_IMAGES=false，跳过 boot 镜像合成"
+elif [[ -f "$REF_BOOT" ]]; then
     color_echo "$green" "合成 boot.img..."
     python3 "$SCRIPT_DIR/tools/make_bootimg_v3.py" \
         --kernel "$IMAGE_PATH" --ref-boot "$REF_BOOT" \
@@ -283,7 +300,9 @@ else
     color_echo "$yellow" "提示: 无 stock/boot.img，跳过 boot.img 合成"
 fi
 
-if [[ -f "$REF_VB" ]]; then
+if [[ "${BUILD_BOOT_IMAGES:-true}" != "true" ]]; then
+    :
+elif [[ -f "$REF_VB" ]]; then
     color_echo "$green" "合成 vendor_boot.img..."
     python3 "$SCRIPT_DIR/tools/make_vendor_boot_v3.py" \
         --dtb "$DTB_PATH" --ref-vendor-boot "$REF_VB" \
