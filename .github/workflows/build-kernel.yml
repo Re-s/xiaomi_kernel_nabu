@@ -73,6 +73,21 @@ jobs:
           echo "artifact_name=${package_filename%.zip}" >> "$GITHUB_OUTPUT"
           unzip -q "${packages[0]}" -d artifacts
 
+          # 一并收上 build.sh 合成的 boot 镜像（存在才收）
+          # build.sh 的 BUILD_DIR=../Releases_nabu_Kuugo（仓库外同级目录）
+          for img in boot.img vendor_boot.img; do
+            src="../Releases_nabu_Kuugo/$img"
+            if [[ -f "$src" ]]; then
+              cp "$src" artifacts/
+              echo "collected $img ($(stat -c%s "$src") bytes)"
+            else
+              echo "note: $img absent (需要 stock/ 下的参考镜像才会合成)"
+            fi
+          done
+
+          # 硬校验：dtb 必须含 RTIC FDT，缺它设备无法启动
+          python3 "$GITHUB_WORKSPACE/tools/verify_rtic_present.py" artifacts/dtb
+
       - name: Upload AnyKernel3 package
         uses: actions/upload-artifact@v4
         with:
