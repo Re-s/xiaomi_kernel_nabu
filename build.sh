@@ -236,6 +236,39 @@ else
     exit 1
 fi
 
+# ------------------------------------------------------------------
+# 可选：合成 boot.img / vendor_boot.img（fastboot flash 用）
+#
+# 需要原厂分区镜像作参考（提供 ramdisk、os_version、各 addr、cmdline）。
+# 把它们放在 stock/ 下即可自动启用；缺失就跳过，只出 AK3 包。
+#
+#   stock/boot.img         原厂 boot 分区   （dd if=/dev/block/by-name/boot_a）
+#   stock/vendor_boot.img  原厂 vendor_boot （dd if=.../vendor_boot_a）
+#
+# 注意 nabu 是 boot header v3：dtb 在 vendor_boot 而非 boot，所以
+# **只刷 boot.img 不会更新 dtb**。要让新 dtb（含 RTIC）生效必须两个都刷。
+# ------------------------------------------------------------------
+REF_BOOT="$SCRIPT_DIR/stock/boot.img"
+REF_VB="$SCRIPT_DIR/stock/vendor_boot.img"
+
+if [[ -f "$REF_BOOT" ]]; then
+    color_echo "$green" "合成 boot.img..."
+    python3 "$SCRIPT_DIR/tools/make_bootimg_v3.py" \
+        --kernel "$IMAGE_PATH" --ref-boot "$REF_BOOT" \
+        -o "$BUILD_DIR/boot.img"
+else
+    color_echo "$yellow" "提示: 无 stock/boot.img，跳过 boot.img 合成"
+fi
+
+if [[ -f "$REF_VB" ]]; then
+    color_echo "$green" "合成 vendor_boot.img..."
+    python3 "$SCRIPT_DIR/tools/make_vendor_boot_v3.py" \
+        --dtb "$DTB_PATH" --ref-vendor-boot "$REF_VB" \
+        -o "$BUILD_DIR/vendor_boot.img"
+else
+    color_echo "$yellow" "提示: 无 stock/vendor_boot.img，跳过 vendor_boot 合成"
+fi
+
 # 创建ZIP文件名
 ZIP_NAME="${TARGET_DEVICE}_${KERNEL_NAME}-${KERNEL_VERSION}_KernelSU-Next_$(date +%y%m%d)$(date +%H%M).zip"
 
