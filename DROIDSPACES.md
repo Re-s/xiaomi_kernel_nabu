@@ -93,17 +93,52 @@ python3 fix_rtic_dtb.py stock/rtic.fdt <dtb> <输出>
 > bootloader/TZ 在校验阶段读取，读完并不合并进内核可见的 DT。拿内核视角
 > 的观测去否证 bootloader 阶段的需求，是一次证据域越界。
 
-## 三、dtb 与 dtbo 的比对方式
+## 三、FDT 顺序：决定能否启动
 
-编出的 `dtb` 与设备在用的整体 md5 **会不同**，但 5 个 FDT 的 md5 完全
-对应，差别只是拼接顺序（`DTB_OBJS` 展开顺序所致）。bootloader 按各 FDT
-内的 `qcom,msm-id` 选型，不依赖位置。
+bootloader **按索引**选设备树。设备 cmdline 里有
+`androidboot.dtb_idx=1`，即取拼接序列中的**第 2 个** FDT（0-based）。
 
-**用 FDT 集合比对，不要用整体 md5。**
+原厂顺序（与 `dts/qcom/Makefile:7` 的
+`nabu-sm8150-overlay.dtbo-base` 声明一致）：
+
+```
+#0 sm8150.dtb      SM8150 v1
+#1 sm8150-v2.dtb   SM8150 v2    ← idx=1，设备实际用这个
+#2 sm8150p.dtb     SM8150P v1
+#3 sm8150p-v2.dtb  SM8150P v2
+#4 rtic_mp.dtb     RTIC (173 B)
+```
+
+而 `arch/arm64/boot/Makefile` 用：
+
+```make
+DTB_OBJS := $(shell find $(obj)/dts/ -name \*.dtb)
+```
+
+`find` 的返回顺序取决于文件系统目录项的物理排列，**不稳定**。实测某次
+构建得到 `SM8150P v1 / SM8150P v2 / SM8150 v2 / SM8150 v1`，于是 idx=1
+落到 `SM8150P v2` —— SM8150**P** 是另一款芯片，刷入后无法启动。
+
+> 症状对照：AnyKernel3 包刷入（会写 dtb）开不了机，而只刷 `boot.img`
+> （header v3 不碰 vendor_boot，dtb 仍是原厂的）可以正常启动。
+
+`build.sh` 已自动重排并做硬门禁。手动检查：
 
 ```sh
-python3 tools/verify_rtic_present.py <dtb>
+python3 tools/reorder_dtb.py --check <dtb>   # rc=0 正确 / rc=1 顺序错
+python3 tools/reorder_dtb.py <输入> <输出>    # 重排
+python3 tools/verify_rtic_present.py <dtb>   # RTIC 存在性（另一道，不可替代）
 ```
+
+顺序正确时，编出的 dtb 与设备原厂**逐字节一致**
+（md5 `feb7799e90987a952c756c2a946433c9`）。
+
+> 两道门禁互不替代：顺序错的 dtb 其 RTIC 校验是**通过**的（RTIC 确实
+> 在，只是平台 FDT 排错了）。
+>
+> 另外不要假设 bootloader 会按 `qcom,msm-id` 自动选型 —— 本项目一度
+> 因此只做 FDT **集合**比对（集合 md5 一致即放行）而漏过了顺序问题。
+> 集合相等不等于序列相等；下游按位置索引时，必须比对序列。
 
 `dtbo.img` 与设备原厂逐字节一致（md5 `341280a8b5cbbdde81d79a31294bb9f9`），
 **无需刷入**。
