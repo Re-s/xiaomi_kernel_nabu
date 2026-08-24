@@ -88,6 +88,10 @@ jobs:
           # 硬校验：dtb 必须含 RTIC FDT，缺它设备无法启动
           python3 "$GITHUB_WORKSPACE/tools/verify_rtic_present.py" artifacts/dtb
 
+          # 硬校验：FDT 顺序必须与原厂一致。设备 androidboot.dtb_idx=1
+          # 按索引取第 2 个 FDT，顺序错会拿到别款芯片的设备树而无法启动。
+          python3 "$GITHUB_WORKSPACE/tools/reorder_dtb.py" --check artifacts/dtb
+
       - name: Upload AnyKernel3 package
         uses: actions/upload-artifact@v4
         with:
