@@ -6146,3 +6146,26 @@ CONFIG_NETFILTER_XT_TARGET_NFLOG=y
 
 # KernelSU-Next
 CONFIG_KSU=y
+
+# ---------------------------------------------------------------
+# DroidSpaces 容器额外配置（上游 DroidSpaces 块未覆盖的部分）
+#
+# 追加在文件末尾即可覆盖前面的声明 —— 上游自己就用这个手法
+# （USER_NS 在 172 行 not set，6120 行 =y）。
+#
+# 注意 CONFIG_BLK_DEV_LOOP 上游已启用（MIN_COUNT=16），无需重复。
+# ---------------------------------------------------------------
+
+# 容器内 ss / lsof 枚举 unix domain socket 需要它
+# tristate，default n，依赖 CONFIG_UNIX=y（上游已满足）
+CONFIG_UNIX_DIAG=y
+
+# 挂载 squashfs 格式的 rootfs 镜像 / AppImage
+CONFIG_SQUASHFS=y
+CONFIG_SQUASHFS_XATTR=y
+CONFIG_SQUASHFS_ZLIB=y
+CONFIG_SQUASHFS_XZ=y
+CONFIG_SQUASHFS_ZSTD=y
+
+# 跨架构二进制（qemu-user / box64）注册需要 binfmt_misc
+CONFIG_BINFMT_MISC=y
