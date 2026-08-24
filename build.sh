@@ -228,6 +228,29 @@ if [[ -f "$DTB_PATH" ]]; then
         exit 1
     fi
 
+    # ------------------------------------------------------------------
+    # 按原厂顺序重排 FDT —— 必须做，否则设备无法启动
+    #
+    # nabu 的 bootloader **按索引**选设备树：cmdline 里
+    # androidboot.dtb_idx=1，取拼接序列的第 2 个 FDT。原厂顺序与
+    # dts/qcom/Makefile 的 nabu-sm8150-overlay.dtbo-base 声明一致：
+    #   sm8150 / sm8150-v2 / sm8150p / sm8150p-v2 / rtic
+    #
+    # 而 arch/arm64/boot/Makefile 用
+    #   DTB_OBJS := $(shell find $(obj)/dts/ -name \*.dtb)
+    # find 的顺序取决于文件系统目录项排列，**不稳定**。实测某次构建
+    # 得到 SM8150P v1 / SM8150P v2 / SM8150 v2 / SM8150 v1，于是 idx=1
+    # 落到 SM8150P v2 —— 芯片型号都不对，刷入后开不了机。
+    #
+    # 症状：AK3 包（会写 dtb）开不了机，只刷 boot.img（不碰 dtb）正常。
+    # ------------------------------------------------------------------
+    color_echo "$green" "按原厂顺序重排 dtb 内的 FDT..."
+    python3 "$SCRIPT_DIR/tools/reorder_dtb.py" "$DTB_PATH" "$DTB_PATH.ordered"
+    mv "$DTB_PATH.ordered" "$DTB_PATH"
+
+    # 硬门禁：顺序不对就不该出包
+    python3 "$SCRIPT_DIR/tools/reorder_dtb.py" --check "$DTB_PATH"
+
     cp "$DTB_PATH" "$ANY_KERNEL_DIR"
 else
     color_echo "$red" "错误: 未检测到 DTB 文件 [$DTB_PATH]"
