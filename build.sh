@@ -187,9 +187,53 @@ ANY_KERNEL_DIR="$SCRIPT_DIR/anykernel"
 cp "$IMAGE_PATH" "$ANY_KERNEL_DIR"
 cp "$DTBO_PATH" "$ANY_KERNEL_DIR"
 if [[ -f "$DTB_PATH" ]]; then
+    # ------------------------------------------------------------------
+    # 补回 RTIC FDT
+    #
+    # 原厂 vendor_boot 的 dtb 尾部有一个 173 字节、含 qcom,rtic-id 与
+    # MP_DATA 的 FDT。arch/arm64/boot/Makefile 里 rtic_mp.dtb 只在
+    # RTIC_MPGEN 有定义时才加入 DTB_OBJS（那需要高通闭源 MPGen 工具），
+    # 因此常规编译产出的 dtb **必然缺少它**。
+    #
+    # 实测：缺这个 FDT 的 dtb 刷入后设备无法正常启动；用原厂 RTIC FDT
+    # 补齐后启动正常。所以这一步不是可选项。
+    #
+    # fix_rtic_dtb.py 是幂等的：dtb 已含 RTIC 时返回 3 并跳过。
+    # ------------------------------------------------------------------
+    RTIC_FDT="$SCRIPT_DIR/stock/rtic.fdt"
+    RTIC_FIXER="$SCRIPT_DIR/fix_rtic_dtb.py"
+    if [[ -f "$RTIC_FDT" && -f "$RTIC_FIXER" ]]; then
+        color_echo "$green" "补回 RTIC FDT 到 dtb..."
+        set +e
+        python3 "$RTIC_FIXER" "$RTIC_FDT" "$DTB_PATH" "$DTB_PATH.fixed"
+        rtic_rc=$?
+        set -e
+        case $rtic_rc in
+            0)
+                mv "$DTB_PATH.fixed" "$DTB_PATH"
+                color_echo "$green" "RTIC FDT 已追加"
+                ;;
+            3)
+                rm -f "$DTB_PATH.fixed"
+                color_echo "$yellow" "dtb 已含 RTIC FDT，跳过"
+                ;;
+            *)
+                color_echo "$red" "错误: RTIC 修补失败 (rc=$rtic_rc)"
+                exit 1
+                ;;
+        esac
+    else
+        color_echo "$red" "错误: 缺少 $RTIC_FDT 或 $RTIC_FIXER"
+        color_echo "$red" "      没有 RTIC FDT 的 dtb 会导致设备无法启动"
+        exit 1
+    fi
+
     cp "$DTB_PATH" "$ANY_KERNEL_DIR"
 else
-    color_echo "$yellow" "提示: 未检测到 DTB 文件，跳过复制"
+    color_echo "$red" "错误: 未检测到 DTB 文件 [$DTB_PATH]"
+    color_echo "$red" "      nabu 需要 dtb，检查 defconfig 是否启用"
+    color_echo "$red" "      CONFIG_MACH_XIAOMI_SM8150 与 CONFIG_BUILD_ARM64_DT_OVERLAY"
+    exit 1
 fi
 
 # 创建ZIP文件名
