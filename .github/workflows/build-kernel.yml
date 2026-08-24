@@ -2,6 +2,35 @@ name: Build kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      kernel_name:
+        description: '内核名（最终: 4.14.336-<名>-<后缀>-<日期>）'
+        required: false
+        default: 'wakmemlody'
+        type: string
+      kernel_suffix:
+        description: '内核名后缀（留空则不加后缀）'
+        required: false
+        default: 'nabu-hyperos1'
+        type: string
+      ksu_variant:
+        description: 'KernelSU 变体'
+        required: false
+        default: 'KernelSU-Next'
+        type: choice
+        options:
+          - KernelSU-Next
+          - none
+      extra_config:
+        description: '追加的 defconfig 项（逗号分隔，如 CONFIG_FOO=y,CONFIG_BAR=n）'
+        required: false
+        default: ''
+        type: string
+      build_boot_images:
+        description: '合成 boot.img / vendor_boot.img（需 stock/ 下有原厂参考镜像）'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -10,9 +39,34 @@ jobs:
   build:
     runs-on: ubuntu-24.04
 
+    env:
+      KERNEL_NAME: ${{ inputs.kernel_name }}
+      KERNEL_SUFFIX: ${{ inputs.kernel_suffix }}
+      # build.sh 读它决定是否合成 boot.img / vendor_boot.img
+      BUILD_BOOT_IMAGES: ${{ inputs.build_boot_images }}
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Show build parameters
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "内核名     : ${KERNEL_NAME}"
+          echo "后缀       : ${KERNEL_SUFFIX:-(无)}"
+          echo "KSU 变体   : ${{ inputs.ksu_variant }}"
+          echo "额外配置   : ${{ inputs.extra_config }}"
+          echo "合成 boot  : ${{ inputs.build_boot_images }}"
+          if [[ -z "${KERNEL_NAME// }" ]]; then
+            echo "::error::kernel_name 不能为空"
+            exit 1
+          fi
+          # 内核名会进 CONFIG_LOCALVERSION，含空格或斜杠会破坏构建
+          if [[ "$KERNEL_NAME$KERNEL_SUFFIX" =~ [[:space:]/] ]]; then
+            echo "::error::内核名与后缀不能含空格或斜杠"
+            exit 1
+          fi
 
       - name: Install Python 2
         shell: bash
@@ -49,6 +103,42 @@ jobs:
           echo "$toolchain_dir/bin" >> "$GITHUB_PATH"
           "$toolchain_dir/bin/clang" --version
 
+      - name: Apply extra defconfig entries
+        if: inputs.extra_config != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          dc=arch/arm64/configs/nabu_defconfig
+          # 追加在末尾即可覆盖前面的声明（内核 Kconfig 后者生效）
+          printf '\n# --- injected by workflow_dispatch ---\n' >> "$dc"
+          IFS=',' read -ra items <<< "${{ inputs.extra_config }}"
+          for item in "${items[@]}"; do
+            entry="$(echo "$item" | xargs)"
+            [[ -z "$entry" ]] && continue
+            if [[ ! "$entry" =~ ^CONFIG_[A-Z0-9_]+=(y|m|n|\".*\"|[0-9]+)$ ]]; then
+              echo "::error::配置项格式不合法: $entry"
+              exit 1
+            fi
+            # =n 要写成 not set 的形式才是真正关闭
+            if [[ "$entry" =~ ^(CONFIG_[A-Z0-9_]+)=n$ ]]; then
+              echo "# ${BASH_REMATCH[1]} is not set" >> "$dc"
+              echo "  关闭 ${BASH_REMATCH[1]}"
+            else
+              echo "$entry" >> "$dc"
+              echo "  追加 $entry"
+            fi
+          done
+
+      - name: Remove KernelSU
+        if: inputs.ksu_variant == 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dc=arch/arm64/configs/nabu_defconfig
+          printf '\n# --- KSU disabled by workflow_dispatch ---\n' >> "$dc"
+          echo '# CONFIG_KSU is not set' >> "$dc"
+          echo "已关闭 CONFIG_KSU"
+
       - name: Build kernel and AnyKernel3 package
         shell: bash
         run: |
@@ -64,7 +154,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           shopt -s nullglob
-          packages=(../Releases_nabu_Kuugo/*.zip)
+          packages=(../Releases_nabu_*/*.zip)
           if (( ${#packages[@]} != 1 )); then
             echo "Expected exactly one AnyKernel3 package, found ${#packages[@]}" >&2
             exit 1
@@ -74,9 +164,8 @@ jobs:
           unzip -q "${packages[0]}" -d artifacts
 
           # 一并收上 build.sh 合成的 boot 镜像（存在才收）
-          # build.sh 的 BUILD_DIR=../Releases_nabu_Kuugo（仓库外同级目录）
           for img in boot.img vendor_boot.img; do
-            src="../Releases_nabu_Kuugo/$img"
+            src="$(dirname "${packages[0]}")/$img"
             if [[ -f "$src" ]]; then
               cp "$src" artifacts/
               echo "collected $img ($(stat -c%s "$src") bytes)"
@@ -91,6 +180,9 @@ jobs:
           # 硬校验：FDT 顺序必须与原厂一致。设备 androidboot.dtb_idx=1
           # 按索引取第 2 个 FDT，顺序错会拿到别款芯片的设备树而无法启动。
           python3 "$GITHUB_WORKSPACE/tools/reorder_dtb.py" --check artifacts/dtb
+
+          # 记录实际内核名，方便对账
+          strings artifacts/Image | grep -m1 '^Linux version' | tee artifacts/KERNEL_VERSION.txt
 
       - name: Upload AnyKernel3 package
         uses: actions/upload-artifact@v4
