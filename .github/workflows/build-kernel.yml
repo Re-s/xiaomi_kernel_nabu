@@ -32,9 +32,9 @@ on:
         default: true
         type: boolean
       ikconfig_stock_masquerade:
-        description: '让 /proc/config.gz 伪装原厂配置（默认关＝输出真实 .config，撞完整性检查才开）'
+        description: '伪装 /proc/config.gz 为原厂配置（HyperOS 必开，见 DROIDSPACES.md 第七节；关闭会弹「设备内部出现问题」）'
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
