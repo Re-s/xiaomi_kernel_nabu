@@ -103,6 +103,16 @@ MAKE_ARGS+=" STRIP=llvm-strip"
 # 交叉编译工具链（系统 GNU binutils）
 MAKE_ARGS+=" CROSS_COMPILE=aarch64-linux-gnu-"
 
+# /proc/config.gz 与 Image 内嵌 IKCFG 段的数据源。
+# 默认输出本次构建真实的 .config，可直接用于验证配置改动；
+# 置 IKCONFIG_STOCK_MASQUERADE=1 则内嵌原厂 nabu-stock_defconfig 伪装原厂内核。
+if [[ "${IKCONFIG_STOCK_MASQUERADE:-0}" =~ ^(1|y|yes)$ ]]; then
+    MAKE_ARGS+=" IKCONFIG_STOCK_MASQUERADE=1"
+    IKCONFIG_MODE="伪装原厂（nabu-stock_defconfig）"
+else
+    IKCONFIG_MODE="真实 .config"
+fi
+
 # 检查设备配置是否存在
 if [[ ! -f "$SCRIPT_DIR/arch/arm64/configs/${TARGET_DEVICE}_defconfig" ]]; then
     color_echo "$red" "错误: 未找到目标设备 [$TARGET_DEVICE] 的配置"
@@ -120,6 +130,7 @@ color_echo "$yellow" "内核名称:    $KERNEL_NAME"
 color_echo "$yellow" "内核版本:    $KERNEL_VERSION"
 color_echo "$yellow" "编译线程数:  $NUM_JOBS"
 color_echo "$yellow" "KernelSU:    禁用"
+color_echo "$yellow" "config.gz:   $IKCONFIG_MODE"
 color_echo "$yellow" "清理:        $($NO_CLEAN && echo "跳过" || echo "执行")"
 color_echo "$cyan" "=============================================="
 

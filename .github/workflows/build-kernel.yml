@@ -31,6 +31,11 @@ on:
         required: false
         default: true
         type: boolean
+      ikconfig_stock_masquerade:
+        description: '让 /proc/config.gz 伪装原厂配置（默认关＝输出真实 .config，撞完整性检查才开）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -44,6 +49,8 @@ jobs:
       KERNEL_SUFFIX: ${{ inputs.kernel_suffix }}
       # build.sh 读它决定是否合成 boot.img / vendor_boot.img
       BUILD_BOOT_IMAGES: ${{ inputs.build_boot_images }}
+      # build.sh 读它决定 /proc/config.gz 内嵌真实 .config 还是原厂伪装配置
+      IKCONFIG_STOCK_MASQUERADE: ${{ inputs.ikconfig_stock_masquerade && '1' || '0' }}
 
     steps:
       - name: Checkout source
@@ -58,6 +65,7 @@ jobs:
           echo "KSU 变体   : ${{ inputs.ksu_variant }}"
           echo "额外配置   : ${{ inputs.extra_config }}"
           echo "合成 boot  : ${{ inputs.build_boot_images }}"
+          echo "config.gz  : ${{ inputs.ikconfig_stock_masquerade && '伪装原厂配置' || '真实 .config' }}"
           if [[ -z "${KERNEL_NAME// }" ]]; then
             echo "::error::kernel_name 不能为空"
             exit 1
@@ -184,18 +192,16 @@ jobs:
           # 记录实际内核名，方便对账
           strings artifacts/Image | grep -m1 '^Linux version' | tee artifacts/KERNEL_VERSION.txt
 
-          # 收上**真实**的 .config。
+          # 收上真实的 .config 作为该次构建配置的权威记录。
           #
-          # 为什么必须单独收：本仓库 kernel/Makefile:126 把 config_data.gz
-          # 的依赖从 $(KCONFIG_CONFIG) 改成了硬编码的
-          # arch/arm64/configs/nabu-stock_defconfig（上游提交 26fb633ed1
-          # "Use the stock nabu config for /proc/config.gz"，为躲 userspace
-          # 完整性检查而故意为之）。后果是 /proc/config.gz 与 Image 内嵌的
-          # IKCFG 段**永远输出原厂 4.14.320 的假配置**，与真实 .config 完全
-          # 脱钩 —— 实测三个不同内核的内嵌配置 md5 完全相同，都声称
-          # LOCALVERSION="-perf"、SQUASHFS not set，而它们明明编了 squashfs。
-          #
-          # 所以**不要用 /proc/config.gz 验证任何配置改动**，看这个文件。
+          # 历史背景：kernel/Makefile 曾把 config_data.gz 的依赖从
+          # $(KCONFIG_CONFIG) 改成硬编码的 arch/arm64/configs/nabu-stock_defconfig
+          # （提交 26fb633ed1，源自 Pixel/marlin，为躲会读 config.gz 的
+          # userspace 检查），导致 /proc/config.gz 与 Image 内嵌 IKCFG 段永远
+          # 输出原厂假配置 —— 曾造成「CONFIG_PROC_CHILDREN 配了没生效」的误判
+          # （实际已生效，是 config.gz 在说谎）。现已改为默认输出真实 .config，
+          # 伪装行为退化为可选开关 IKCONFIG_STOCK_MASQUERADE=1。
+          # 下面的 IKCFG 一致性门禁会守住这个契约，防止再次回退。
           real_config="$(dirname "${packages[0]}")/.config"
           if [[ -f "$real_config" ]]; then
             cp "$real_config" artifacts/build.config
@@ -227,6 +233,22 @@ jobs:
             [[ $missing -eq 0 ]] || exit 1
           else
             echo "::warning::找不到真实 .config，跳过配置断言"
+          fi
+
+          # 硬校验：Image 内嵌的 IKCFG 段（即设备上 /proc/config.gz 的内容）
+          # 必须等于本次构建真实的 .config，否则 config.gz 会对 userspace 说谎，
+          # 任何人拿 zcat /proc/config.gz 验证配置都会被误导。
+          # 开了伪装开关时反向断言（内嵌应确为原厂配置，而非静默失效）。
+          if [[ -f artifacts/build.config && -f artifacts/Image ]]; then
+            if [[ "${IKCONFIG_STOCK_MASQUERADE:-0}" == "1" ]]; then
+              python3 "$GITHUB_WORKSPACE/tools/verify_ikconfig.py" \
+                --expect-masquerade artifacts/Image artifacts/build.config
+            else
+              python3 "$GITHUB_WORKSPACE/tools/verify_ikconfig.py" \
+                artifacts/Image artifacts/build.config
+            fi
+          else
+            echo "::warning::缺 build.config 或 Image，跳过 IKCFG 一致性校验"
           fi
 
       - name: Upload AnyKernel3 package
