@@ -22,7 +22,7 @@ on:
           - KernelSU-Next
           - none
       extra_config:
-        description: '追加的 defconfig 项（逗号分隔，如 CONFIG_FOO=y,CONFIG_BAR=n）'
+        description: '追加 defconfig 项，逗号分隔（验证请看产物 build.config，勿用 /proc/config.gz）'
         required: false
         default: ''
         type: string
@@ -183,6 +183,51 @@ jobs:
 
           # 记录实际内核名，方便对账
           strings artifacts/Image | grep -m1 '^Linux version' | tee artifacts/KERNEL_VERSION.txt
+
+          # 收上**真实**的 .config。
+          #
+          # 为什么必须单独收：本仓库 kernel/Makefile:126 把 config_data.gz
+          # 的依赖从 $(KCONFIG_CONFIG) 改成了硬编码的
+          # arch/arm64/configs/nabu-stock_defconfig（上游提交 26fb633ed1
+          # "Use the stock nabu config for /proc/config.gz"，为躲 userspace
+          # 完整性检查而故意为之）。后果是 /proc/config.gz 与 Image 内嵌的
+          # IKCFG 段**永远输出原厂 4.14.320 的假配置**，与真实 .config 完全
+          # 脱钩 —— 实测三个不同内核的内嵌配置 md5 完全相同，都声称
+          # LOCALVERSION="-perf"、SQUASHFS not set，而它们明明编了 squashfs。
+          #
+          # 所以**不要用 /proc/config.gz 验证任何配置改动**，看这个文件。
+          real_config="$(dirname "${packages[0]}")/.config"
+          if [[ -f "$real_config" ]]; then
+            cp "$real_config" artifacts/build.config
+            echo "collected build.config ($(wc -l < artifacts/build.config) lines)"
+          else
+            # 退路：从内核源码树找
+            for c in .config out/.config; do
+              if [[ -f "$c" ]]; then
+                cp "$c" artifacts/build.config
+                echo "collected build.config from $c"
+                break
+              fi
+            done
+          fi
+
+          # 断言我们加的配置真的被 Kconfig 采纳了。
+          # 依赖未满足时 Kconfig 会静默丢弃，只看 defconfig 里写了什么不够。
+          if [[ -f artifacts/build.config ]]; then
+            missing=0
+            for opt in CONFIG_UNIX_DIAG CONFIG_SQUASHFS CONFIG_BINFMT_MISC \
+                       CONFIG_PROC_CHILDREN CONFIG_USER_NS; do
+              if grep -qx "$opt=y" artifacts/build.config; then
+                echo "OK   $opt=y"
+              else
+                echo "::error::$opt 未被 Kconfig 采纳（检查依赖是否满足）"
+                missing=1
+              fi
+            done
+            [[ $missing -eq 0 ]] || exit 1
+          else
+            echo "::warning::找不到真实 .config，跳过配置断言"
+          fi
 
       - name: Upload AnyKernel3 package
         uses: actions/upload-artifact@v4
