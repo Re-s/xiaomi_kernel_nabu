@@ -153,3 +153,12 @@ anykernel/Image
 #
 KernelSU-Next
 drivers/kernelsu
+
+#
+# 原厂参考镜像：不入库。boot 参考件近 19 MiB，且二进制在 git 历史里无法增量
+# 存储（每次改动都留一份完整副本）。改由 workflow 从 Release tag 'stock-ref'
+# 拉取；本地可用 tools/make_stock_ref.py 从原厂分区自行裁出。
+# stock/rtic.fdt 只有 173 B 且是启动必需项，已入库 —— 用 ! 显式保留。
+#
+stock/*.img
+!stock/rtic.fdt

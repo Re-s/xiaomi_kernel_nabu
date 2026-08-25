@@ -180,8 +180,13 @@ def main():
         print("::error::回读复验不一致")
         return 1
 
-    delta = len(dtb) - ref["dtb_size"]
-    print(f"  dtb 相比原厂 {delta:+d} 字节")
+    # 精简参考件（tools/make_stock_ref.py 裁出）已把 dtb 段去掉、dtb_size 置 0，
+    # 此时算差值没有意义，会显示成 "+全部字节" 而误导人。
+    if ref["dtb_size"]:
+        delta = len(dtb) - ref["dtb_size"]
+        print(f"  dtb 相比原厂 {delta:+d} 字节")
+    else:
+        print(f"  dtb {len(dtb)} 字节（参考件不含 dtb 段，无法比差值）")
     return 0
 
 
