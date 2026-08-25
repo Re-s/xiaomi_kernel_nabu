@@ -6169,3 +6169,7 @@ CONFIG_SQUASHFS_ZSTD=y
 
 # 跨架构二进制（qemu-user / box64）注册需要 binfmt_misc
 CONFIG_BINFMT_MISC=y
+
+# 容器 / 进程管理器枚举子进程需要 /proc/<pid>/task/<tid>/children
+# fs/proc/Kconfig 里 default n 且无 depends on，独立布尔项，无连带影响
+CONFIG_PROC_CHILDREN=y
