@@ -103,6 +103,16 @@ MAKE_ARGS+=" STRIP=llvm-strip"
 # 交叉编译工具链（系统 GNU binutils）
 MAKE_ARGS+=" CROSS_COMPILE=aarch64-linux-gnu-"
 
+# /proc/config.gz 与 Image 内嵌 IKCFG 段的数据源。
+# 默认输出本次构建真实的 .config，可直接用于验证配置改动；
+# 置 IKCONFIG_STOCK_MASQUERADE=1 则内嵌原厂 nabu-stock_defconfig 伪装原厂内核。
+if [[ "${IKCONFIG_STOCK_MASQUERADE:-0}" =~ ^(1|y|yes)$ ]]; then
+    MAKE_ARGS+=" IKCONFIG_STOCK_MASQUERADE=1"
+    IKCONFIG_MODE="伪装原厂（nabu-stock_defconfig）"
+else
+    IKCONFIG_MODE="真实 .config"
+fi
+
 # 检查设备配置是否存在
 if [[ ! -f "$SCRIPT_DIR/arch/arm64/configs/${TARGET_DEVICE}_defconfig" ]]; then
     color_echo "$red" "错误: 未找到目标设备 [$TARGET_DEVICE] 的配置"
@@ -120,6 +130,7 @@ color_echo "$yellow" "内核名称:    $KERNEL_NAME"
 color_echo "$yellow" "内核版本:    $KERNEL_VERSION"
 color_echo "$yellow" "编译线程数:  $NUM_JOBS"
 color_echo "$yellow" "KernelSU:    禁用"
+color_echo "$yellow" "config.gz:   $IKCONFIG_MODE"
 color_echo "$yellow" "清理:        $($NO_CLEAN && echo "跳过" || echo "执行")"
 color_echo "$cyan" "=============================================="
 
@@ -276,8 +287,17 @@ fi
 # ------------------------------------------------------------------
 # 可选：合成 boot.img / vendor_boot.img（fastboot flash 用）
 #
-# 需要原厂分区镜像作参考（提供 ramdisk、os_version、各 addr、cmdline）。
-# 把它们放在 stock/ 下即可自动启用；缺失就跳过，只出 AK3 包。
+# 需要原厂镜像作参考（提供 ramdisk、os_version、各 addr、cmdline）。
+# 放到 stock/ 下即自动启用；缺失就跳过，只出 AK3 包。
+#
+# 优先用 tools/make_stock_ref.py 裁出的**精简参考件**（推荐，体积小得多；
+# 实测 boot 49.4→18.9 MiB、vendor_boot 1.9 MiB→8 KiB，且合成结果与用全量
+# 镜像逐字节相同 —— 因为原厂内核与原厂 dtb 本来就会被新产物替换掉）：
+#
+#   stock/boot-ref.img          精简 boot 参考件
+#   stock/vendor_boot-ref.img   精简 vendor_boot 参考件
+#
+# 也接受直接放全量原厂分区镜像（向后兼容）：
 #
 #   stock/boot.img         原厂 boot 分区   （dd if=/dev/block/by-name/boot_a）
 #   stock/vendor_boot.img  原厂 vendor_boot （dd if=.../vendor_boot_a）
@@ -285,30 +305,38 @@ fi
 # 注意 nabu 是 boot header v3：dtb 在 vendor_boot 而非 boot，所以
 # **只刷 boot.img 不会更新 dtb**。要让新 dtb（含 RTIC）生效必须两个都刷。
 # ------------------------------------------------------------------
-REF_BOOT="$SCRIPT_DIR/stock/boot.img"
-REF_VB="$SCRIPT_DIR/stock/vendor_boot.img"
+pick_ref() {
+    # 依次探测候选路径，返回第一个存在的
+    local p
+    for p in "$@"; do
+        [[ -f "$p" ]] && { printf '%s' "$p"; return 0; }
+    done
+    return 1
+}
+REF_BOOT="$(pick_ref "$SCRIPT_DIR/stock/boot-ref.img" "$SCRIPT_DIR/stock/boot.img" || true)"
+REF_VB="$(pick_ref "$SCRIPT_DIR/stock/vendor_boot-ref.img" "$SCRIPT_DIR/stock/vendor_boot.img" || true)"
 
 # BUILD_BOOT_IMAGES=false 可显式跳过（CI 的 workflow_dispatch 输入）
 if [[ "${BUILD_BOOT_IMAGES:-true}" != "true" ]]; then
     color_echo "$yellow" "BUILD_BOOT_IMAGES=false，跳过 boot 镜像合成"
-elif [[ -f "$REF_BOOT" ]]; then
-    color_echo "$green" "合成 boot.img..."
+elif [[ -n "$REF_BOOT" ]]; then
+    color_echo "$green" "合成 boot.img（参考: ${REF_BOOT#$SCRIPT_DIR/}）..."
     python3 "$SCRIPT_DIR/tools/make_bootimg_v3.py" \
         --kernel "$IMAGE_PATH" --ref-boot "$REF_BOOT" \
         -o "$BUILD_DIR/boot.img"
 else
-    color_echo "$yellow" "提示: 无 stock/boot.img，跳过 boot.img 合成"
+    color_echo "$yellow" "提示: 无 stock/boot-ref.img 或 stock/boot.img，跳过 boot.img 合成"
 fi
 
 if [[ "${BUILD_BOOT_IMAGES:-true}" != "true" ]]; then
     :
-elif [[ -f "$REF_VB" ]]; then
-    color_echo "$green" "合成 vendor_boot.img..."
+elif [[ -n "$REF_VB" ]]; then
+    color_echo "$green" "合成 vendor_boot.img（参考: ${REF_VB#$SCRIPT_DIR/}）..."
     python3 "$SCRIPT_DIR/tools/make_vendor_boot_v3.py" \
         --dtb "$DTB_PATH" --ref-vendor-boot "$REF_VB" \
         -o "$BUILD_DIR/vendor_boot.img"
 else
-    color_echo "$yellow" "提示: 无 stock/vendor_boot.img，跳过 vendor_boot 合成"
+    color_echo "$yellow" "提示: 无 stock/vendor_boot-ref.img 或 stock/vendor_boot.img，跳过 vendor_boot 合成"
 fi
 
 # 创建ZIP文件名

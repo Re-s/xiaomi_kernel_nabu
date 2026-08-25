@@ -122,8 +122,23 @@ obj-y += mi_iolimit_common.o
 
 $(obj)/configs.o: $(obj)/config_data.h
 
+# /proc/config.gz 与 Image 内嵌 IKCFG 段的数据源。
+#
+# 默认 $(KCONFIG_CONFIG)（= 本次构建真实的 .config），与上游一致，
+# 这样 zcat /proc/config.gz 拿到的就是真实配置，能用来验证配置改动。
+#
+# 设 IKCONFIG_STOCK_MASQUERADE=1 可切回历史行为：内嵌写死的原厂
+# nabu-stock_defconfig，向 userspace 伪装成未改过的原厂内核。该行为源自
+# 移植自 Pixel/marlin 的提交 26fb633ed1（"Use the stock nabu config for
+# /proc/config.gz"），用于躲开会读 config.gz 的 userspace 检查。
+# 代价是内嵌配置与真实 .config 完全脱钩 —— 曾导致
+# "CONFIG_PROC_CHILDREN 配了没生效" 的误判（实际已生效，是 config.gz 在说谎）。
+# 已核实小米原厂 nabu 内核与多数第三方 nabu 内核都输出真实配置，
+# 故默认关闭伪装；仅在确实撞上完整性检查时才需要打开。
+IKCONFIG_DATA_SRC := $(if $(filter 1 y yes,$(IKCONFIG_STOCK_MASQUERADE)),arch/arm64/configs/nabu-stock_defconfig,$(KCONFIG_CONFIG))
+
 targets += config_data.gz
-$(obj)/config_data.gz: arch/arm64/configs/nabu-stock_defconfig FORCE
+$(obj)/config_data.gz: $(IKCONFIG_DATA_SRC) FORCE
 	$(call if_changed,gzip)
 
       filechk_ikconfiggz = (echo "static const char kernel_config_data[] __used = MAGIC_START"; cat $< | scripts/basic/bin2c; echo "MAGIC_END;")

@@ -15,17 +15,37 @@ AnyKernel3 模板）全部原样沿用，未做替换。改动集中在下面几
 
 | 文件 | 改动 |
 | --- | --- |
-| `arch/arm64/configs/nabu_defconfig` | 追加 7 行容器配置 |
-| `build.sh` | 补回 RTIC FDT；合成 boot/vendor_boot；dtb 缺失改为硬失败 |
+| `arch/arm64/configs/nabu_defconfig` | 追加容器配置（UNIX_DIAG / SQUASHFS 族 / BINFMT_MISC / PROC_CHILDREN） |
+| `build.sh` | 补回 RTIC FDT；合成 boot/vendor_boot；dtb 缺失改为硬失败；透传 `IKCONFIG_STOCK_MASQUERADE`；优先认精简参考件 |
 | `fix_rtic_dtb.py` | 新增，RTIC FDT 修补器 |
 | `stock/rtic.fdt` | 新增，173 字节原厂 RTIC FDT |
 | `tools/make_bootimg_v3.py` | 新增，boot.img 生成器 |
 | `tools/make_vendor_boot_v3.py` | 新增，vendor_boot.img 生成器 |
 | `tools/verify_rtic_present.py` | 新增，RTIC 存在性硬校验 |
+| `tools/verify_ikconfig.py` | 新增，Image 内嵌配置一致性门禁（默认正向 / 伪装反向断言） |
+| `tools/make_stock_ref.py` | 新增，原厂分区裁剪成精简参考件（配合 Release `stock-ref`） |
+| `.github/workflows/build-kernel.yml` | 参考件从 Release 拉取并硬校验；新增 `ikconfig_stock_masquerade` 输入；IKCFG 一致性门禁 |
 
-## 一、追加的内核配置
+## 一、实际开启的内核配置
 
-只加了上游 DroidSpaces 配置块未覆盖的三类：
+配置分两层：上游 DroidSpaces 块整体沿用，本分支在文件末尾追加上游未覆盖的
+四组。权威清单永远是 CI 产物 **`build.config`**（= 构建真实的 `.config`），
+本节是带原因与验证手段的导读。
+
+### 上游 DroidSpaces 块（`nabu_defconfig` 尾部，原样沿用）
+
+| 类别 | 配置 | 用途 |
+| --- | --- | --- |
+| IPC | `SYSVIPC` `POSIX_MQUEUE` `SYSCTL` | 容器内进程通信 |
+| 命名空间 | `NAMESPACES` `PID_NS` `UTS_NS` `IPC_NS` `NET_NS` `USER_NS` | 容器隔离基础；`USER_NS` 在尾部覆盖了 172 行的 not set（注释 *Fix for docker unsafe procfs error*） |
+| Seccomp | `SECCOMP` `SECCOMP_FILTER` | 容器运行时默认要求 |
+| cgroup | `CGROUPS` 与 device/pids/mem/sched/freezer/net_prio 子系统 | 资源限制 |
+| 文件系统 | `DEVTMPFS` `OVERLAY_FS` `TMPFS_POSIX_ACL` `TMPFS_XATTR` | rootfs 挂载、volatile 模式、NixOS 支持 |
+| 固件 | `FW_LOADER` 三件套 | 用户态固件加载 |
+| 网络隔离 | `VETH` `BRIDGE` 及 Netfilter 全家桶（ConnTrack/NAT/NFT/iptables/MASQUERADE/ipset 等） | NAT/none 网络模式；UFW、fail2ban 规则集 |
+| 其他 | `KSU`（KernelSU-Next）；`BLK_DEV_LOOP` 已启用（`MIN_COUNT=16`，无需重复） | |
+
+### 本分支追加（上游未覆盖的四组）
 
 ```
 CONFIG_UNIX_DIAG=y        # 容器内 ss / lsof 枚举 unix domain socket
@@ -35,35 +55,33 @@ CONFIG_SQUASHFS_ZLIB=y
 CONFIG_SQUASHFS_XZ=y
 CONFIG_SQUASHFS_ZSTD=y
 CONFIG_BINFMT_MISC=y      # 注册 qemu-user / box64 跨架构执行
+CONFIG_PROC_CHILDREN=y    # /proc/<pid>/task/<tid>/children，容器/进程管理器枚举子进程
 ```
 
-以下**不需要**再加，上游已具备：
+`PROC_CHILDREN` 是独立布尔项（default n、无 depends on），无连带影响；
+defconfig 中部曾有一条重复的 not set 声明容易误导读，已改为指向性注释。
 
-- `CONFIG_BLK_DEV_LOOP` —— 已启用，且 `MIN_COUNT=16`
-- `CONFIG_USER_NS` —— 上游 DroidSpaces 块自带（`nabu_defconfig:6120`，
-  注释 `Fix for docker unsafe procfs error`），覆盖了 172 行的 not set
-- namespace / cgroup / overlayfs / netfilter 等 —— 上游 DroidSpaces 块已齐备
+追加在文件末尾即可覆盖前面的声明，上游自身就用这个手法
+（`USER_NS` 在 172 行 not set、尾部 =y，后者胜出）。
 
-追加在文件末尾即可覆盖前面的 `is not set` 声明，上游自身就用这个手法。
+### 实机验证矩阵（HyperOS 1 / Android 13）
 
-### 实机验证
+| 配置 | 运行时证据 | 结果 |
+| --- | --- | --- |
+| `USER_NS` | `ls /proc/self/ns/` 出现 `user`；`unshare -U echo OK` | ✓（刷入前无 user、unshare 报 Invalid argument） |
+| `SQUASHFS` | `grep squashfs /proc/filesystems` 有输出 | ✓ |
+| `BINFMT_MISC` | `/proc/sys/fs/binfmt_misc` 存在 | ✓ |
+| `UNIX_DIAG` | kallsyms 含 `unix_diag_handler/_dump/_init`；`ss -x` 正常 | ✓ |
+| `PROC_CHILDREN` | `cat /proc/<pid>/task/<pid>/children` 可读，能完整枚举 zygote64 子进程 | ✓ |
+| cgroup / netfilter / veth 等 | 以容器内功能实际可用为准，未逐项做内核级断言 | — |
 
-```
-$ ls /proc/self/ns/
-cgroup ipc mnt net pid pid_for_children user uts      # user 出现了
-$ unshare -U echo OK
-OK
-$ grep squashfs /proc/filesystems
-        squashfs
-$ ls -d /proc/sys/fs/binfmt_misc
-/proc/sys/fs/binfmt_misc
-```
+CI 对五项关键配置做硬断言（`UNIX_DIAG` `SQUASHFS` `BINFMT_MISC`
+`PROC_CHILDREN` `USER_NS`），防 Kconfig 因依赖不满足而静默丢弃——只看
+defconfig 里写了什么是不够的。
 
-刷入前该设备 `/proc/self/ns/` 无 `user`，`unshare -U` 返回
-`Invalid argument`。
-
-> 该内核未开 `CONFIG_IKCONFIG_PROC`，所以没有 `/proc/config.gz`。
-> 用上面这些运行时证据判断，比读配置文本更可靠。
+> 当前分支已开 `CONFIG_IKCONFIG_PROC`，设备上有 `/proc/config.gz`。
+> 注意：HyperOS 上该接口的内容有讲究，见第七节 —— 伪装模式是实测必需项。
+> 验证配置改动仍以运行时证据与 CI 产物 `build.config` 为准。
 
 ## 二、RTIC FDT：启动必需，不是可选加固
 
@@ -145,8 +163,20 @@ python3 tools/verify_rtic_present.py <dtb>   # RTIC 存在性（另一道，不�
 
 ## 四、合成 boot.img / vendor_boot.img
 
-把原厂分区镜像放在 `stock/` 下，`build.sh` 会自动合成；缺失则跳过，
-只产出 AnyKernel3 包。
+把参考镜像放在 `stock/` 下，`build.sh` 会自动合成；缺失则跳过，只产出
+AnyKernel3 包。支持两种形式，**优先精简参考件**：
+
+- `stock/boot-ref.img` / `stock/vendor_boot-ref.img` —— 用
+  `tools/make_stock_ref.py` 从原厂分区裁出的精简件（实测 boot
+  49.4→18.9 MiB、vendor_boot 1.9 MiB→8 KiB；合成结果与全量件**逐字节相同**，
+  因为被裁掉的原厂内核/dtb 反正会被新产物替换）
+- `stock/boot.img` / `stock/vendor_boot.img` —— 直接放全量分区镜像（向后兼容）
+
+CI 不入库这些二进制，从 Release tag **`stock-ref`** 拉取同名 `-ref.img`，
+下载后校验 magic 与 header 版本；要求合成而拿不到参考件时**直接失败**，
+不再静默跳过。裁剪原理与往返验证方法见 `tools/make_stock_ref.py` 头注释。
+
+从设备取原厂分区：
 
 ```sh
 adb shell su -c 'dd if=/dev/block/by-name/boot_a of=/sdcard/boot.img'
@@ -249,3 +279,44 @@ v3 镜像不自包含（dtb 和加载地址都在 vendor_boot），无法临时�
 `stock/` 参考镜像存在时的 `boot.img` / `vendor_boot.img`。
 
 CI 会对 dtb 做 RTIC 存在性硬校验 —— 缺 RTIC 的包不该流出。
+
+## 七、/proc/config.gz 与原厂伪装（HyperOS 必读）
+
+`CONFIG_IKCONFIG_PROC=y` 把构建配置内嵌进 Image，设备上
+`zcat /proc/config.gz` 可读。本仓库把它的数据源做成了开关：
+
+| 模式 | 触发方式 | `/proc/config.gz` 内容 |
+| --- | --- | --- |
+| 真实配置 | 默认 | 本次构建真实的 `.config` |
+| 原厂伪装 | `IKCONFIG_STOCK_MASQUERADE=1`（CI 输入 `ikconfig_stock_masquerade`） | 写死的原厂 `nabu-stock_defconfig` |
+
+### 实测结论：HyperOS 上请开伪装
+
+> 刷入输出**真实配置**的内核后，系统每次开机弹「**设备内部出现问题**」
+> 全局对话框（uid 1000 框架对话框、带确认按钮、不影响使用）；换回带
+> **原厂伪装**的内核后消失。—— 2026-08-25 实机对照
+>
+> 结论：HyperOS 侧存在校验 `/proc/config.gz` 内容的组件，伪装模式在
+> HyperOS 上是**必需项**，不是可选项。
+
+机制边界（诚实版）：AOSP 全树检索只有 libvintf、两个 CTS/VTS 用例和手动
+执行的 `vintf` 会读 config.gz，libvintf 还是懒加载、失败也不报错；触发弹窗
+的具体小米组件未能定位（闭源）。上述因果来自整机对照实验，非源码级证实。
+历史背景：伪装行为源自移植自 Pixel/marlin 的提交 `26fb633ed1`。
+
+### 构建与门禁
+
+```sh
+# 本地：伪装模式
+IKCONFIG_STOCK_MASQUERADE=1 ./build.sh nabu -j"$(nproc)"
+
+# CI：勾选 ikconfig_stock_masquerade 输入即可
+```
+
+CI 门禁 `tools/verify_ikconfig.py` 两种模式都把关：
+
+- 默认模式：断言 Image 内嵌 IKCFG ≡ 真实 `.config`
+- 伪装模式：反向断言内嵌确为原厂配置（防开关静默失效）
+
+无论哪种模式，**验证配置改动都只看 CI 产物 `build.config`**——伪装模式下
+`/proc/config.gz` 按设计就是说谎的，不要拿它当证据。

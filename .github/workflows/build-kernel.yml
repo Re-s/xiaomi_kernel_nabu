@@ -31,6 +31,11 @@ on:
         required: false
         default: true
         type: boolean
+      ikconfig_stock_masquerade:
+        description: '让 /proc/config.gz 伪装原厂配置（默认关＝输出真实 .config，撞完整性检查才开）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -44,6 +49,10 @@ jobs:
       KERNEL_SUFFIX: ${{ inputs.kernel_suffix }}
       # build.sh 读它决定是否合成 boot.img / vendor_boot.img
       BUILD_BOOT_IMAGES: ${{ inputs.build_boot_images }}
+      # build.sh 读它决定 /proc/config.gz 内嵌真实 .config 还是原厂伪装配置
+      IKCONFIG_STOCK_MASQUERADE: ${{ inputs.ikconfig_stock_masquerade && '1' || '0' }}
+      # 存放原厂 boot/vendor_boot 参考件的 Release tag（资产不入库，见 Fetch 步骤）
+      STOCK_REF_TAG: stock-ref
 
     steps:
       - name: Checkout source
@@ -58,6 +67,7 @@ jobs:
           echo "KSU 变体   : ${{ inputs.ksu_variant }}"
           echo "额外配置   : ${{ inputs.extra_config }}"
           echo "合成 boot  : ${{ inputs.build_boot_images }}"
+          echo "config.gz  : ${{ inputs.ikconfig_stock_masquerade && '伪装原厂配置' || '真实 .config' }}"
           if [[ -z "${KERNEL_NAME// }" ]]; then
             echo "::error::kernel_name 不能为空"
             exit 1
@@ -139,6 +149,50 @@ jobs:
           echo '# CONFIG_KSU is not set' >> "$dc"
           echo "已关闭 CONFIG_KSU"
 
+      # 原厂参考件不入库（boot 参考件 18.9 MiB，二进制在 git 历史里无法增量存储），
+      # 改从 Release 拉。它们只提供 ramdisk / os_version / cmdline / 各 addr，
+      # 内核与 dtb 都会被本次构建的新产物替换，故内容与内核版本无关，一次上传长期复用。
+      # 制作方法见 tools/make_stock_ref.py（可直接喂整分区 dd 件）。
+      - name: Fetch stock reference images
+        if: inputs.build_boot_images
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p stock
+          missing=0
+          for f in boot-ref.img vendor_boot-ref.img; do
+            if gh release download "$STOCK_REF_TAG" --repo "$GITHUB_REPOSITORY" \
+                 --pattern "$f" --dir stock --clobber 2>/dev/null; then
+              echo "已取得 stock/$f（$(stat -c%s "stock/$f") 字节）"
+            else
+              echo "::error::Release '$STOCK_REF_TAG' 缺少资产 $f"
+              missing=1
+            fi
+          done
+          if (( missing )); then
+            echo "::error::build_boot_images=true 但拿不到原厂参考件，无法合成 boot 镜像。"
+            echo "::error::请先建 tag '$STOCK_REF_TAG' 的 Release 并上传 boot-ref.img / vendor_boot-ref.img"
+            echo "::error::（用 tools/make_stock_ref.py 从原厂分区裁出），或把 build_boot_images 设为 false。"
+            exit 1
+          fi
+          # 参考件必须是合法 v3 镜像，坏文件要在编译前就拦住
+          python3 - <<'PY'
+          import struct, sys
+          for path, magic, name in (
+              ("stock/boot-ref.img", b"ANDROID!", "boot"),
+              ("stock/vendor_boot-ref.img", b"VNDRBOOT", "vendor_boot"),
+          ):
+              buf = open(path, "rb").read()
+              if buf[:8] != magic:
+                  sys.exit(f"::error::{path} magic 不对（{buf[:8]!r}），不是 {name} 镜像")
+              hv = struct.unpack("<I", buf[40:44] if name == "boot" else buf[8:12])[0]
+              if hv != 3:
+                  sys.exit(f"::error::{path} 是 header v{hv}，需要 v3")
+              print(f"[OK] {path} 是合法 {name} v3 镜像")
+          PY
+
       - name: Build kernel and AnyKernel3 package
         shell: bash
         run: |
@@ -163,14 +217,20 @@ jobs:
           echo "artifact_name=${package_filename%.zip}" >> "$GITHUB_OUTPUT"
           unzip -q "${packages[0]}" -d artifacts
 
-          # 一并收上 build.sh 合成的 boot 镜像（存在才收）
+          # 一并收上 build.sh 合成的 boot 镜像。
+          # 若用户要求了合成（build_boot_images=true），缺产物就是硬错误 ——
+          # 参考件已在前面的 Fetch 步骤校验过，走到这里还缺说明合成真的失败了，
+          # 不能像以前那样只打一句 note 就放过（那会让人以为刷机包是完整的）。
           for img in boot.img vendor_boot.img; do
             src="$(dirname "${packages[0]}")/$img"
             if [[ -f "$src" ]]; then
               cp "$src" artifacts/
               echo "collected $img ($(stat -c%s "$src") bytes)"
+            elif [[ "${BUILD_BOOT_IMAGES}" == "true" ]]; then
+              echo "::error::build_boot_images=true 但 $img 未生成（参考件已就位，合成环节失败）"
+              exit 1
             else
-              echo "note: $img absent (需要 stock/ 下的参考镜像才会合成)"
+              echo "note: $img absent (build_boot_images=false)"
             fi
           done
 
@@ -184,18 +244,16 @@ jobs:
           # 记录实际内核名，方便对账
           strings artifacts/Image | grep -m1 '^Linux version' | tee artifacts/KERNEL_VERSION.txt
 
-          # 收上**真实**的 .config。
+          # 收上真实的 .config 作为该次构建配置的权威记录。
           #
-          # 为什么必须单独收：本仓库 kernel/Makefile:126 把 config_data.gz
-          # 的依赖从 $(KCONFIG_CONFIG) 改成了硬编码的
-          # arch/arm64/configs/nabu-stock_defconfig（上游提交 26fb633ed1
-          # "Use the stock nabu config for /proc/config.gz"，为躲 userspace
-          # 完整性检查而故意为之）。后果是 /proc/config.gz 与 Image 内嵌的
-          # IKCFG 段**永远输出原厂 4.14.320 的假配置**，与真实 .config 完全
-          # 脱钩 —— 实测三个不同内核的内嵌配置 md5 完全相同，都声称
-          # LOCALVERSION="-perf"、SQUASHFS not set，而它们明明编了 squashfs。
-          #
-          # 所以**不要用 /proc/config.gz 验证任何配置改动**，看这个文件。
+          # 历史背景：kernel/Makefile 曾把 config_data.gz 的依赖从
+          # $(KCONFIG_CONFIG) 改成硬编码的 arch/arm64/configs/nabu-stock_defconfig
+          # （提交 26fb633ed1，源自 Pixel/marlin，为躲会读 config.gz 的
+          # userspace 检查），导致 /proc/config.gz 与 Image 内嵌 IKCFG 段永远
+          # 输出原厂假配置 —— 曾造成「CONFIG_PROC_CHILDREN 配了没生效」的误判
+          # （实际已生效，是 config.gz 在说谎）。现已改为默认输出真实 .config，
+          # 伪装行为退化为可选开关 IKCONFIG_STOCK_MASQUERADE=1。
+          # 下面的 IKCFG 一致性门禁会守住这个契约，防止再次回退。
           real_config="$(dirname "${packages[0]}")/.config"
           if [[ -f "$real_config" ]]; then
             cp "$real_config" artifacts/build.config
@@ -227,6 +285,22 @@ jobs:
             [[ $missing -eq 0 ]] || exit 1
           else
             echo "::warning::找不到真实 .config，跳过配置断言"
+          fi
+
+          # 硬校验：Image 内嵌的 IKCFG 段（即设备上 /proc/config.gz 的内容）
+          # 必须等于本次构建真实的 .config，否则 config.gz 会对 userspace 说谎，
+          # 任何人拿 zcat /proc/config.gz 验证配置都会被误导。
+          # 开了伪装开关时反向断言（内嵌应确为原厂配置，而非静默失效）。
+          if [[ -f artifacts/build.config && -f artifacts/Image ]]; then
+            if [[ "${IKCONFIG_STOCK_MASQUERADE:-0}" == "1" ]]; then
+              python3 "$GITHUB_WORKSPACE/tools/verify_ikconfig.py" \
+                --expect-masquerade artifacts/Image artifacts/build.config
+            else
+              python3 "$GITHUB_WORKSPACE/tools/verify_ikconfig.py" \
+                artifacts/Image artifacts/build.config
+            fi
+          else
+            echo "::warning::缺 build.config 或 Image，跳过 IKCFG 一致性校验"
           fi
 
       - name: Upload AnyKernel3 package

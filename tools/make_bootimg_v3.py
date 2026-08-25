@@ -132,8 +132,13 @@ def main():
               f"（0x38 处应为 ARM\\x64，实为 {kernel[0x38:0x3c]!r}）")
         return 1
     print(f"\n[内核] {args.kernel} {len(kernel)} 字节 (arm64 magic OK)")
-    delta = len(kernel) - ref["kernel_size"]
-    print(f"  相比原厂 {delta:+d} 字节")
+    # 精简参考件（tools/make_stock_ref.py 裁出）不含原厂内核、kernel_size 为 0，
+    # 此时算差值会显示成 "+全部字节" 而误导人。
+    if ref["kernel_size"]:
+        delta = len(kernel) - ref["kernel_size"]
+        print(f"  相比原厂 {delta:+d} 字节")
+    else:
+        print("  （参考件不含原厂内核，无法比差值）")
 
     if args.ramdisk:
         with open(args.ramdisk, "rb") as fh:
